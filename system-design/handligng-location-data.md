@@ -85,7 +85,7 @@ With 5000 read and 1000 write requests, Each read request will contains 10 recor
 - `content-lenth` of write request `(1 records * 100 bytes) + ~800 bytes request meta = ~ 900 bytes `
 
 ```
-data tranfer per secs = (5000 read requests * 1800) + (1000 read requests * 900) = 9.9 Megabyte = ~10 Megabyte
+data transfer/sec = (5000 read requests * 1800) + (1000 read requests * 900) = 9.9 Megabyte = ~10 Megabyte
 ```
 
 ### Network Protocol Choice
@@ -100,8 +100,7 @@ we have assumed to support web & mobile clients, we need to choose a protocol wh
 
 ### Database Schema
 
-- Since our data is static, it makes sense to put data into a data store since these locations are mostly static.
-  On other hand If it will be very dynamic like cab’s location or delivery boy’s location & those locations constantly get pushed to your system, it does not make sense to store them in persistent data store unless we want to enable tracking for this or that purpose.
+Since our data is static, it makes sense to put data into a data store since these locations are mostly static. On other hand If it will be very dynamic like cab’s location or delivery boy’s location & those locations constantly get pushed to our system, it does not make sense to store them in persistent data store unless we want to enable tracking for this or that purpose.
 
 ### High Level Design (HLD)
 
@@ -112,4 +111,29 @@ we have assumed to support web & mobile clients, we need to choose a protocol wh
 
 #### Load balancer
 
-- Considering in the worst case all the traffic come from the same region, it will be difficult for a single server to manage that load. So we need stateless application servers which can share the load among themselves. Hence the load balancer comes into action.
+**1. Why do we need a load balancer here?**
+Considering in the worst case all the traffic come from the same region, it will be difficult for a single server to manage that load. So we need stateless application servers which can share the load among themselves. Hence the load balancer comes into action.
+
+Now our problem statement becomes:
+**How to make the locations searchable since our data store might not natively supports it or even if it supports, we can’t put so much of load with growing scale?**
+
+### Approach: Create partitions in memory & search in-memory
+
+Our initial data size is around `2 Gigabytes` & it can grow up to `450 Gigabytes` or more in near future. Since we need to support massive read queries, we can do aggressive caching, but depending on the cost, we can start by using single machine, but with time we need to have distributed cache to accomdate hundreds of Gigabytes.
+
+_What shall we store in the cache?_
+In this approach, for any location query, we are finding distance between the client provided (lat, long) & all locations stored across all cache machines. After finding out all the result, we rank the locations based on ascending distance order & client provided criteria if any. This is basically a brute force search & we do it completely in memory, so it’s faster than doing the whole operation in database provided our database does not support location queries. It does not matter in what format we store the locations, we may store the location id as key & the location object as value or if the cache supports list of objects, we can store list of locations against any key & search across the list of locations.
+
+_How will the cache get loaded?_
+We can have a scheduled job which will run every few minutes and load the locations since the last id or timestamp. This is not a real time process, so we can have our write path also write / update the location information when the POST location API gets called. In the following architecture the write path has 2 steps:
+
+- Step 1: Write to the database,
+- Step 2: Write to the cache.
+
+_What is the strategy to partition the cache machines?_
+There are many strategies to partition the cache machines, Here in our case locatin based sharding will be more approriate. In order to manage these shards & balance the load evenly across all possible cache servers, we will use a central metadata registry. The metadata registry awill contain mapping from region to logical paritition id, logical shard id to in-memory index server id mapping ( using service discovery mechanism. Both the read & write request first talk to the metadata registry, using the IP address of the request’s origin, we determine in which reagion the delivery agent exactly is or from where the user request came. Using the resolved region, shard id is identified, then using shard id, index server is identified. Finally the request is directed towards that particular index server. So we don’t need to query all the cache / index server any more. Note that, in this architecture, neither read nor write requests talk to the data store directly, this reduces the API latency even further.
+
+<p align="center">
+  <img src="./images/hdl-2.1.png" label="High Level Design">
+  <h4 align="center">High Level Design<h4>
+</p>
